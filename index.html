@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Private Camera & Mic Call</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:auto;padding:18px;background:#111;color:#eee}
+h1{font-size:24px}.note{background:#222;padding:12px;border-radius:10px}
+.controls{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
+input,button{padding:11px;border-radius:8px;border:1px solid #555}
+button{cursor:pointer}.videos{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+video{width:100%;background:#000;border-radius:12px;min-height:220px}
+#status{margin:10px 0;color:#9f9}
+@media(max-width:650px){.videos{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>Camera & Microphone Call</h1>
+<div class="note">
+<strong>Permission required:</strong> Camera and microphone are only accessed after the participant
+opens this page and explicitly grants browser permission. Sharing can be stopped at any time.
+</div>
+
+<div class="controls">
+<input id="room" placeholder="Room name">
+<button id="join">Join / Start</button>
+<button id="copy" disabled>Copy invite link</button>
+<button id="mute" disabled>Mute mic</button>
+<button id="camera" disabled>Turn camera off</button>
+<button id="leave" disabled>Leave</button>
+</div>
+
+<div id="status">Not connected.</div>
+
+<div class="videos">
+  <div><div>You</div><video id="local" autoplay playsinline muted></video></div>
+  <div><div>Other participant</div><video id="remote" autoplay playsinline></video></div>
+</div>
+
+<script src="/socket.io/socket.io.js"></script>
+<script>
+const socket = io();
+const roomInput = document.getElementById("room");
+const statusEl = document.getElementById("status");
+const localVideo = document.getElementById("local");
+const remoteVideo = document.getElementById("remote");
+const joinBtn = document.getElementById("join");
+const copyBtn = document.getElementById("copy");
+const muteBtn = document.getElementById("mute");
+const cameraBtn = document.getElementById("camera");
+const leaveBtn = document.getElementById("leave");
+
+let pc, stream, room, initiator = false;
+
+const rtcConfig = {
+  iceServers: [
+    {urls:"stun:stun.l.google.com:19302"}
+  ]
+};
+
+function setStatus(x){ statusEl.textContent=x; }
+
+async function getMedia(){
+  stream = await navigator.mediaDevices.getUserMedia({video:true,audio:true});
+  localVideo.srcObject = stream;
+}
+
+function makePeer(){
+  pc = new RTCPeerConnection(rtcConfig);
+  stream.getTracks().forEach(t => pc.addTrack(t, stream));
+
+  pc.ontrack = e => {
+    remoteVideo.srcObject = e.streams[0];
+    setStatus("Connected. Camera and microphone are being shared.");
+  };
+
+  pc.onicecandidate = e => {
+    if(e.candidate) socket.emit("signal",{type:"candidate",candidate:e.candidate});
+  };
+
+  pc.onconnectionstatechange = () => {
+    if(["failed","disconnected","closed"].includes(pc.connectionState))
+      setStatus("Connection ended.");
+  };
+}
+
+async function call(){
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
+  socket.emit("signal",{type:"offer",sdp:pc.localDescription});
+}
+
+async function acceptOffer(sdp){
+  await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+  const answer = await pc.createAnswer();
+  await pc.setLocalDescription(answer);
+  socket.emit("signal",{type:"answer",sdp:pc.localDescription});
+}
+
+joinBtn.onclick = async () => {
+  try{
+    room = roomInput.value.trim();
+    if(!room) return alert("Enter a room name.");
+    await getMedia();
+    makePeer();
+    socket.emit("join", room);
+    joinBtn.disabled=true;
+    roomInput.disabled=true;
+    copyBtn.disabled=false;
+    muteBtn.disabled=false;
+    cameraBtn.disabled=false;
+    leaveBtn.disabled=false;
+    setStatus("Waiting for the other participant...");
+  }catch(e){
+    alert("Camera/microphone permission was not granted or is unavailable.");
+  }
+};
+
+socket.on("joined", ({room:r, initiator:i}) => {
+  room=r; initiator=i;
+  if(initiator) setStatus("Room created. Send the invite link to the other participant.");
+});
+
+socket.on("peer-ready", async () => {
+  if(initiator) await call();
+});
+
+socket.on("signal", async data => {
+  try{
+    if(data.type==="offer"){
+      await acceptOffer(data.sdp);
+    }else if(data.type==="answer"){
+      await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+    }else if(data.type==="candidate" && data.candidate){
+      await pc.addIceCandidate(data.candidate);
+    }
+  }catch(e){ console.error(e); }
+});
+
+socket.on("room-full",()=>alert("This room already has two participants."));
+socket.on("peer-left",()=>{ remoteVideo.srcObject=null; setStatus("The other participant left."); });
+
+copyBtn.onclick = async () => {
+  const url = location.origin + location.pathname + "?room=" + encodeURIComponent(room);
+  await navigator.clipboard.writeText(url);
+  setStatus("Invite link copied.");
+};
+
+muteBtn.onclick=()=>{
+  const t=stream?.getAudioTracks()[0]; if(!t)return;
+  t.enabled=!t.enabled; muteBtn.textContent=t.enabled?"Mute mic":"Unmute mic";
+};
+cameraBtn.onclick=()=>{
+  const t=stream?.getVideoTracks()[0]; if(!t)return;
+  t.enabled=!t.enabled; cameraBtn.textContent=t.enabled?"Turn camera off":"Turn camera on";
+};
+leaveBtn.onclick=()=>{
+  socket.emit("leave");
+  pc?.close(); stream?.getTracks().forEach(t=>t.stop());
+  localVideo.srcObject=null; remoteVideo.srcObject=null;
+  joinBtn.disabled=false; roomInput.disabled=false;
+  copyBtn.disabled=muteBtn.disabled=cameraBtn.disabled=leaveBtn.disabled=true;
+  setStatus("You left the call.");
+};
+
+const q=new URLSearchParams(location.search).get("room");
+if(q) roomInput.value=q;
+</script>
+</body>
+</html>
